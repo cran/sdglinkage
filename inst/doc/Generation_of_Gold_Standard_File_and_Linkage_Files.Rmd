@@ -1,0 +1,188 @@
+---
+title: "Generation of Gold Standard File and Linkage Files"
+author: "Haoyuan Zhang"
+date: "2/20/2020"
+output:
+  html_document:
+    number_sections: yes
+    theme: united
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      toc_collapsed: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  word_document:
+    toc: yes
+    toc_depth: '3'
+
+vignette: >
+  %\VignetteIndexEntry{Generation of Gold Standard File and Linkage Files}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '../') 
+```
+
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(sdglinkage)
+set.seed(1234)
+```
+
+
+In this vignette, we show how we can use **sdglinkage** to generate a realistic synthetic gold standard file and how to damage the gold standard file into multiple copies of linkage files that can be used for linkage research. 
+
+
+Usually, when a trusted third party release a dataset to a research organisation, they will remove sensitive identifiers to prevent the data to be linked back to real individuals. In the meanwhile, for research purpose, some organisations will publish the error statistics happened in their dataset. This vignette targets for people from a research organisation that has access to non-sensitive predictor variables and statistics of the error occurred to both predictor variables and sensitive identifiers. And they would like to share a synthetic gold standard and linkage files of this dataset with realistic identifiers to a wider audience. For people from a trusted third party that has the access to sensitive identifiers please see vignette [From_Sensitive_Real_Identifiers_to_Synthetic_Identifiers](From_Sensitive_Real_Identifiers_to_Synthetic_Identifiers.html).
+
+* Assumption:
+  * **Real gold standard file (real_gsf)**: We have a gold standard file with non-sensitive predictor variables that we would like to synthesised.
+  * **Error statistics**: We have the statistics of the errors occurred to both predictor variables and sensitive identifiers.
+
+* Aim: 
+  * To generate synthetic predictor variables.
+  * To add external identifier variables to the synthetic predictor variables, which is considered as our synthetic gold standard file **(syn_gsf)**.
+  * To damage the synthetic gold standard file with the error statistics, which gives us the synthetic linkage file **(syn_lf)**. 
+  * To show how these linkage files can be used for linkage method evaluation.
+
+
+A gold standard file that gives us the true values of variables of interest, and linkage files that mimic the original error formats of real data. The following figure outlines the framework in generating these two types of files. In this example, we assume we have access to predictor variables such as sex, age and ethnicity but not sensitive identifiers such as nhsid and names. We also assume to know the errors occurred in all variables. We simulate three types of variables, which includes predictor variables learned together with the encoded error flags, external dependent identifiers and independent identifiers. These generated synthetic variables are then merged into a gold standard file and further damaged by inferred synthetic errors, which give us synthetic linkage files.
+
+![Generating gold standard file and linkage files.](sdg_framework.png)
+
+# Generate Gold Standard File
+A gold standard file consists of predictor variables and identifier variables. In this section we should how we can generate synthetic predictor variables that we have access to and append them with synthetic external dependent identifiers and independent identifiers that we do not have access to. 
+
+
+## Training Data with One-Hot Encoded Error Flags 
+
+If we know where and what type of error had happened in the dataset, we would like to encode the position and type of error using one-hot encoding. For example, flag Edward's name variant error as '1' if his name record was typed as 'Eddy'. This gives us a training dataset with one-hot encoded error flags. Bear in mind that we should build the error flags for all variables of interests, including independent identifiers - because even though the values of independent identifiers are independent of the values of other variables, the occurrence of errors of them can depend on the values or occurrence of errors of other variables. For example, a person from a minority group is more likely to have a missing value in the nhsid variable than those were born in the UK. This results in a training dataset with many error flags together with the values of the dependent variables. 
+
+In vignette [From_Sensitive_Real_Identifiers_to_Synthetic_Identifiers](From_Sensitive_Real_Identifiers_to_Synthetic_Identifiers.html) we show how to extract these errors if we have access to the corrupt files. In this subsection, we show how to encode these error flags in case we do not have access to the error but have information about the error statistics. 
+
+
+
+We use the 'age', 'race' and 'sex' variables from the 'Adult' dataset as an example of real predictor variables. Meanwhile, we know the statistics and errors consist in our target dataset, e.g. 30% of the age is missing and 50% of the race is missing. 
+```{r}
+real_gsf = adult[c('age', 'race', 'sex')][1:3000,]
+real_gsf_with_flags <- add_random_error(real_gsf, prob = c(0.70, 0.30), "age_missing")
+real_gsf_with_flags <- add_random_error(real_gsf_with_flags, prob = c(0.50, 0.50), "race_missing")
+real_gsf_with_flags <- add_random_error(real_gsf_with_flags, prob = c(0.65, 0.35), "sex_missing")
+real_gsf_with_flags <- add_random_error(real_gsf_with_flags, prob = c(0.90, 0.10), "postcode_trans_char")
+real_gsf_with_flags <- add_random_error(real_gsf_with_flags, prob = c(0.50, 0.50), "firstname_variant")
+real_gsf_with_flags <- add_random_error(real_gsf_with_flags, prob = c(0.50, 0.50), "lastname_variant")
+real_gsf_with_flags <- add_random_error(real_gsf_with_flags, prob = c(0.50, 0.50), "firstname_typo")
+real_gsf_with_flags <- add_random_error(real_gsf_with_flags, prob = c(0.50, 0.50),"firstname_pho")
+real_gsf_with_flags <- add_random_error(real_gsf_with_flags, prob = c(0.50, 0.50), "firstname_ocr")
+real_gsf_with_flags <- add_random_error(real_gsf_with_flags, prob = c(0.50, 0.50),"firstname_trans_char")
+head(real_gsf_with_flags)
+```
+
+
+
+## Generate Synthetic Predictor Variables
+
+We use BNs to learn the dependency and parameters of the training dataset and sample data from the trained model. The generated data not only preserves the relationships and statistics between the variables, but also the occurrence of errors (this is useful for the inference for linkage file that is introduced later). 
+
+```{r}
+bn_learn <- gen_bn_learn(real_gsf_with_flags, "hc")
+syn_dependent <- bn_learn$gen_data[, !grepl("flag", colnames(bn_learn$gen_data))]
+head(syn_dependent)
+```
+
+
+## Add Synthetic Independent Identifiers Following Rules
+
+Here we randomly assign an nhsid and an address to each individual. nhsid is generated using the Modulus 11 Algorithm, and address is sampled from a real uk address database.
+
+```{r}
+syn_gsf <- add_variable(syn_dependent, "nhsid")
+syn_gsf <- add_variable(syn_gsf, "address")
+syn_gsf$country <-NULL
+syn_gsf$primary_care_trust <-NULL
+syn_gsf$longitude <-NULL
+syn_gsf$latitude <-NULL
+head(syn_gsf)
+```
+
+
+
+## Add External Dependent Identifiers From Similar Real Datasets
+
+Firstname and lastname are two sensitive identifiers that are often removed when releasing the dataset to another organisation. But meanwhile, several organisations have published databases of names given different population. We make use of these resources and build a uk firstname database that depends on gender and age, uk lastname database, us firstname database that depends on gender and race and us lastname database that depends on the race.
+
+Here we randomly assign a firstname and a lastname to an individual based on the value of gender and age and the frequency of the names. Firstname and lastname are sampled from a real uk database of baby birth name ranging from 1996 to 2018. Together with the synthetic predictors and independent identifiers, we have the synthetic gold standard file. 
+
+```{r}
+syn_gsf <- add_variable(syn_gsf, "firstname", country = "uk", gender_dependency = TRUE, age_dependency = TRUE)
+syn_gsf <- add_variable(syn_gsf, "lastname", country = "uk")
+head(syn_gsf)
+```
+
+
+
+# Generate Linkage Files
+The linkage files are copies of the gold standard file that were damaged by several damage actions. In this section, we show how to generate two linkage files that can be used for linkage activity.
+
+## Inference Multiple Synthetic Error Occurrence Files
+
+The error occurrence files are inferenced using the previously trained model based on the record of each individual. This gives us the guidance of the damage actions. 
+
+```{r}
+syn_error_occurrence1 <- bn_flag_inference(bn_learn$gen_data, bn_learn$fit_model)
+head(syn_error_occurrence1)
+
+syn_error_occurrence2 <- bn_flag_inference(bn_learn$gen_data, bn_learn$fit_model)
+head(syn_error_occurrence2)
+```
+
+
+## Damage Gold Standard File According to The Error Occurrence
+
+Here we damage the gold standard file based on the inferred occurrence of the errors.
+
+```{r}
+syn_lf1 <- damage_gold_standard(syn_gsf, syn_error_occurrence1)
+head(syn_lf1$linkage_file)
+head(syn_lf1$error_log)
+
+syn_lf2 <- damage_gold_standard(syn_gsf, syn_error_occurrence2)
+head(syn_lf2$linkage_file)
+```
+
+
+
+
+# Use the Synthetic Linkage Files To Evaluate the Performance of Linkage Methods
+Here we give an example of how the generated linkage files can be used for linkage evaluation. 
+```{r results='hide', message=FALSE, warning=FALSE}
+library(reclin)
+library(dplyr)
+# 'postcode' is used as the blocking variable. 
+linked_data_set <- pair_blocking(syn_lf1$linkage_file, syn_lf2$linkage_file, "postcode") %>%
+  compare_pairs(by = c("lastname", "firstname", "sex", "race"),
+                default_comparator = jaro_winkler(0.8)) %>%
+  score_problink(var = "weight") %>%
+  select_n_to_m("weight", var = "ntom", threshold = 0) %>%
+  link()
+```
+
+
+
+We can see out of 3000 individuals, there are only 2487 are matched using the method from **reclin**. This is because the block variable 'postcode' itself is unreliable as 10% of them has transposed characters. 
+
+Among the 2487 matched records, 2480 of them are true match and 7 of them are mismatched:
+```{r}
+# This gives us the statistics of missed match
+table(linked_data_set$nhsid.x == linked_data_set$nhsid.y)
+
+# These are records of missed match
+head(linked_data_set[linked_data_set$nhsid.x != linked_data_set$nhsid.y,],7)
+```
+
+

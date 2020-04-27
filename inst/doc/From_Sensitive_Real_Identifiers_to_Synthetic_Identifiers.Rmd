@@ -1,0 +1,219 @@
+---
+title: "From Sensitive Real Identifiers to Synthetic Identifiers"
+author: "Haoyuan Zhang"
+date: "2/19/2020"
+output:
+  html_document:
+    number_sections: yes
+    theme: united
+    toc: yes
+    toc_depth: 3
+    toc_float:
+      toc_collapsed: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  word_document:
+    toc: yes
+    toc_depth: '3'
+    
+vignette: >
+  %\VignetteIndexEntry{From Sensitive Real Identifiers to Synthetic Identifiers}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = '../') 
+```
+
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(sdglinkage)
+set.seed(1234)
+```
+
+
+In this vignette, we show how we can use **sdglinkage** to generate a synthetic version of sensitive identifiers for linkage methods development. This is particularly useful for people from a trusted third party that has the access to sensitive identifiers such as names and ID numbers and would like to share a synthetic yet realistic version of the identifiers to a wider audience (e.g. [ALSPAC dataset](http://bristol.ac.uk/alspac/)). For people that has the access to sensitive identifiers please see vignette [Generation_of_Gold_Standard_File_and_Linkage_Files](Generation_of_Gold_Standard_File_and_Linkage_Files.html).
+
+
+* Assumption:
+  * **Real gold standard file (real_gsf)**: We have a reference file of identifiers that best estimate the current ‘true’ value of the identifiers as recorded in our administrative database.
+  * **Real linkage files (real_lf)**: We have a follow-up file of identifiers that has been populated at a different period and collected by different operators.
+
+* Aim: 
+  * To detect errors in the real dataset and classify the errors associated with each individual into specific error types.
+  * To replace sensitive variables with equivalent variables from another database.
+  * To create several versions of synthetic identifiers, including **synthetic gold standard file (syn_gsf)** and **synthetic linkage files (syn_lfs)** that mimicking the change and error in **real_lf** as well as reproducing the variables and the dependencies across variables as in **real_gsf**.
+
+
+
+# 'Real' Dataset: real_gsf and real_lf
+
+For confidentiality reasons, we are unable to release our experimental datasets, instead, for demonstration purpose, we create two versions of identifier datasets and consider them as our 'real' datasets. 
+
+* **real_gsf**: The gold standard file consists of identifiers sex, nhsid, race, dob, uk firstname that depends on the person's gender and age, and uk lastname.
+* **real_lf**: The linkage file is derived from real_gsf with errors including 10% of the race was missing, 45% the day and month of dob were transposed, 35% the firstname has been entered as its variant and 25% of the lastname has a typo.
+
+
+## real_gsf
+This is what the real_gsf looks like
+```{r}
+real_gsf <- data.frame(sex=sample(c('male', 'female'), 100, replace = TRUE))
+real_gsf <- add_variable(real_gsf, "nhsid")
+real_gsf <- real_gsf[,c(2, 1)]
+real_gsf$race <- sample(1:6, 100, replace = TRUE)
+real_gsf <- add_variable(real_gsf, "dob", age_dependency = FALSE)
+real_gsf <- add_variable(real_gsf, "firstname", country = "uk", gender_dependency= TRUE, age_dependency = TRUE)
+real_gsf <- add_variable(real_gsf, "lastname", country = "uk")
+head(real_gsf)
+```
+
+## real_lf
+This is what the real_lf looks like. We can see some errors here such as in row3 the race is missing and dob was transposed from '1945-11-01' to '1945-01-11' and in row4 the name 'charlotte' was entered as its variant 'carlotta'. 
+```{r}
+error_occurrence_flags <- data.frame(tmp=character(100))
+error_occurrence_flags <- add_random_error(error_occurrence_flags, prob = c(0.90, 0.10), "race_missing")
+error_occurrence_flags <- add_random_error(error_occurrence_flags, prob = c(0.55, 0.45), "dob_trans_date")
+error_occurrence_flags <- add_random_error(error_occurrence_flags, prob = c(0.65, 0.35), "firstname_variant")
+error_occurrence_flags <- add_random_error(error_occurrence_flags, prob = c(0.75, 0.25), "lastname_typo")
+error_occurrence_flags$tmp <-NULL
+real_lf <- damage_gold_standard(real_gsf, error_occurrence_flags)$linkage_file
+head(real_lf)
+```
+
+
+
+# Detect and Classify Errors of Real Dataset
+In the real world, we often do not know where the errors were recorded in the dataset. For a less maintained dataset, we have to manually compare its identifiers with the identifiers from the reference dataset. The clerical work is usually tedious and error-prone. 
+
+In this section, we show how to use **sdglinkage** to detect the inconsistency between real_lf and real_gsf and to classify the errors into different error categories. 
+
+
+## Compare real_lf with real_gsf
+Here we use nhsid as our unique identifiers to link real_gsf and real_lf and compares variables race, dob, firstname and lastname.
+```{r}
+vars = list(c('race', 'race'), c('dob', 'dob'), c('firstname', 'firstname'), c('lastname', 'lastname'))
+diffs.table = compare_two_df(real_gsf, real_lf, vars, 'nhsid')
+diffs.table
+```
+
+
+## Classfy Errors
+Here we show how to append error flags into real_gsf based on the difference between real_gsf and real_lf. 
+
+Here we detect if there is missing in the race variable, if yes, the individual will be flagged as 1 in the newly built race_missing_flag variable. The same princeple applies to the rest of the errors and variables. 
+```{r}
+real_gsf_with_flags = acquire_error_flag(real_gsf, diffs.table, 'race', 'missing')
+real_gsf_with_flags = acquire_error_flag(real_gsf_with_flags, diffs.table, 'dob', 'trans_date')
+real_gsf_with_flags = acquire_error_flag(real_gsf_with_flags, diffs.table, 'firstname', 'variant')
+real_gsf_with_flags = acquire_error_flag(real_gsf_with_flags, diffs.table, 'lastname', 'typo')
+```
+
+error_occurrence_flags is the error we enter when creating the 'real_lf', and acquired_error_flags is the extracted and classified error from the 'real_lf'. 
+```{r}
+head(error_occurrence_flags)
+acquired_error_flags = real_gsf_with_flags[grep('flag', colnames(real_gsf_with_flags))]
+head(acquired_error_flags)
+```
+
+
+Let's compare the acquired_error_flags with error_occurrence_flags: if they are completely identical, then it means that our method has successfully extracted and classified the errors happened in the real_lf into the correct categories. 
+```{r}
+all.equal(acquired_error_flags, error_occurrence_flags)
+```
+
+
+There is one mismatch in the dob_trans_date_flag column, which is because the dob was the same after transposed. 
+```{r}
+real_gsf[c(28),]
+real_lf[c(28),]
+```
+
+Let's fix it and we can see they are identifical now.
+```{r}
+error_occurrence_flags$dob_trans_date_flag[c(28)] = 0
+all.equal(acquired_error_flags, error_occurrence_flags)
+```
+
+
+
+
+# Masked Sensitive Variables
+
+Even though the synthetic data we generate later will be sampled from the generator, that means, the data is fully synthesised and cannot be linked back to real-world identifiers. But the sampling of sensitive variables such as names is from the real dataset and can be worrisome for some parties. Therefore, we also provide a function to replace these sensitive variables with variables from another database. 
+
+Previously, we generate the 'real_gsf' with firstname from the uk population that depends on the individual's gender and age, here we show how we can replace them with firstname from us population that depends on the individual's gender and race. We also replace the lastname from us population and randomly assign a new nhsid to each individual.
+```{r}
+real_gsf_with_flags_replaced = replace_firstname(real_gsf_with_flags, country = 'us', gender_dependency = TRUE, race_dependency = TRUE)
+real_gsf_with_flags_replaced = replace_lastname(real_gsf_with_flags_replaced, country = 'us', race_dependency = TRUE)
+real_gsf_with_flags_replaced = replace_nhsid(real_gsf_with_flags_replaced)
+```
+
+
+This is what the original dataset looks like:
+```{r}
+head(real_gsf_with_flags[colnames(real_gsf)])
+```
+
+This is what the replaced dataset looks like:
+```{r}
+head(real_gsf_with_flags_replaced[colnames(real_gsf)])
+```
+
+
+# Generate Synthetic Identifiers
+Here we show how to use our generator to generate synthetic identifiers from the real_gsf_with_flags_replaced. More details about the performance of the generator please see vignette [Synthetic_Data_Generation_and_Evaluation](Synthetic_Data_Generation_and_Evaluation.html).
+
+
+```{r}
+# Here we set the variables into the right format for the generator
+real_gsf_with_flags_replaced[colnames(real_gsf_with_flags_replaced)] <- lapply(real_gsf_with_flags_replaced[colnames(real_gsf_with_flags_replaced)], factor) 
+
+# We use learned bn to train a generator
+bn_learn <- gen_bn_learn(real_gsf_with_flags_replaced, "hc")
+
+# syn_gsf is the generated synthetic gold standard file
+syn_gsf = bn_learn$gen_data
+head(syn_gsf)
+
+
+# syn_lf1 and syn_lf2 are the synthetic linkage files that were damaged by the inferred error occurrence in the syn_gsf
+syn_error_occurrence_1 <- bn_flag_inference(syn_gsf, bn_learn$fit_model)
+syn_lf1 <- damage_gold_standard(syn_gsf, syn_error_occurrence_1)
+head(syn_lf1$linkage_file)
+
+syn_error_occurrence_2 <- bn_flag_inference(syn_gsf, bn_learn$fit_model)
+syn_lf2 <- damage_gold_standard(syn_gsf, syn_error_occurrence_2)
+head(syn_lf2$linkage_file)
+```
+
+
+
+
+# Use syn_lf1 and syn_lf2 for Linkage Methods Evaluation
+
+Here we give an example of how the generated linkage files can be used for linkage evaluation. 
+```{r message=FALSE, warning=FALSE}
+library(reclin)
+library(dplyr)
+
+linked_data_set <- pair_blocking(syn_lf1$linkage_file, syn_lf2$linkage_file, "dob") %>%
+  compare_pairs(by = c("lastname", "firstname", "sex", "race"),
+                default_comparator = jaro_winkler(0.8)) %>%
+  score_problink(var = "weight") %>%
+  select_n_to_m("weight", var = "ntom", threshold = 0) %>%
+  link()
+```
+
+
+
+We can see out of 100 individuals, there are only 59 are matched using the method from **reclin**. This is because the block variable 'dob' itself is unreliable as 45% of them has transposed date error. 
+
+Among the 59 matched records, 56 of them are true match and 3 of them are mismatched:
+```{r}
+table(linked_data_set$nhsid.x == linked_data_set$nhsid.y)
+head(linked_data_set[linked_data_set$nhsid.x != linked_data_set$nhsid.y,],3)
+```
+
